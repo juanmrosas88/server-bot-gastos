@@ -1,6 +1,6 @@
 import express from "express";
 import twilio from "twilio";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { google } from "googleapis";
 import fetch from "node-fetch";
 
@@ -8,7 +8,7 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // Google Sheets auth usando la variable de entorno GOOGLE_CREDENTIALS
 const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);

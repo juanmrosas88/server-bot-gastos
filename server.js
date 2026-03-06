@@ -10,7 +10,6 @@ app.use(express.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Google Sheets auth usando la variable de entorno GOOGLE_CREDENTIALS
 const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 const auth = new google.auth.GoogleAuth({
   credentials,
@@ -18,8 +17,8 @@ const auth = new google.auth.GoogleAuth({
 });
 
 const SHEET_ID = process.env.SHEET_ID;
+const TZ = { timeZone: "America/Argentina/Buenos_Aires" };
 
-// Health check
 app.get("/", (req, res) => res.send("Bot de gastos activo ✅"));
 
 app.post("/webhook", async (req, res) => {
@@ -27,108 +26,88 @@ app.post("/webhook", async (req, res) => {
 
   try {
     const { Body, MediaUrl0, MediaContentType0 } = req.body;
-
+    const hoy = new Date().toLocaleDateString("es-AR", TZ);
     let gastoData;
 
     if (MediaUrl0) {
-      // Viene una imagen (comprobante/ticket)
       const imageResponse = await fetch(MediaUrl0, {
         headers: {
-          Authorization:
-            "Basic " +
-            Buffer.from(
-              `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
-            ).toString("base64"),
+          Authorization: "Basic " + Buffer.from(
+            `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+          ).toString("base64"),
         },
       });
-
       const imageBuffer = await imageResponse.arrayBuffer();
       const base64Image = Buffer.from(imageBuffer).toString("base64");
       const mediaType = MediaContentType0 || "image/jpeg";
 
-      const result = await claude.messages.create({
-        model: "claude-sonnet-4-20250514",
+      const result = await openai.chat.completions.create({
+        model: "gpt-4o",
         max_tokens: 500,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "image",
-                source: { type: "base64", media_type: mediaType, data: base64Image },
-              },
-              {
-                type: "text",
-                text: `Sos un asistente que extrae datos de comprobantes de gastos.
-Analizá la imagen y extraé: monto (solo el número, sin símbolos), descripción breve, categoría (elegí una: comida, transporte, servicios, salud, entretenimiento, ropa, supermercado, otro), fecha (formato DD/MM/YYYY, si no se ve usá hoy: ${new Date().toLocaleDateString("es-AR")}).
-Respondé SOLO con JSON válido, sin texto extra, sin backticks:
-{"monto": 0, "descripcion": "", "categoria": "", "fecha": ""}`,
-              },
-            ],
-          },
-        ],
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: `data:${mediaType};base64,${base64Image}` },
+            },
+            {
+              type: "text",
+              text: `Extraé del comprobante: monto (solo número), descripción breve, categoría (comida/transporte/servicios/salud/entretenimiento/ropa/supermercado/otro), fecha (formato DD/MM/AAAA, si no se ve usá ${hoy}).
+Respondé SOLO JSON sin backticks: {"monto": 0, "descripcion": "", "categoria": "", "fecha": ""}`,
+            },
+          ],
+        }],
       });
 
-      const text = result.content[0].text.trim();
-      gastoData = JSON.parse(text);
+      gastoData = JSON.parse(result.choices[0].message.content.trim());
+
     } else if (Body) {
-      // Viene texto
-      const result = await claude.messages.create({
-        model: "claude-sonnet-4-20250514",
+      const result = await openai.chat.completions.create({
+        model: "gpt-4o",
         max_tokens: 300,
-        messages: [
-          {
-            role: "user",
-            content: `Sos un asistente que extrae datos de gastos desde mensajes de texto.
-El usuario escribió: "${Body}"
-Extraé: monto (solo número, sin símbolos de moneda), descripción breve, categoría (elegí una: comida, transporte, servicios, salud, entretenimiento, ropa, supermercado, otro), fecha (formato DD/MM/YYYY, si no se menciona usá hoy: ${new Date().toLocaleDateString("es-AR")}).
-Respondé SOLO con JSON válido, sin texto extra, sin backticks:
-{"monto": 0, "descripcion": "", "categoria": "", "fecha": ""}`,
-          },
-        ],
+        messages: [{
+          role: "user",
+          content: `El usuario escribió: "${Body}"
+Extraé: monto (solo número), descripción breve, categoría (comida/transporte/servicios/salud/entretenimiento/ropa/supermercado/otro), fecha (formato DD/MM/AAAA, si no se menciona usá ${hoy}).
+Respondé SOLO JSON sin backticks: {"monto": 0, "descripcion": "", "categoria": "", "fecha": ""}`,
+        }],
       });
 
-      const text = result.content[0].text.trim();
-      gastoData = JSON.parse(text);
+      gastoData = JSON.parse(result.choices[0].message.content.trim());
+
     } else {
-      twiml.message("No entendí el mensaje. Enviame un monto y descripción, por ejemplo: *350 almuerzo*");
+      twiml.message("Enviame un monto y descripción, por ejemplo: *350 almuerzo*");
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // Guardar en Google Sheets
     const sheets = google.sheets({ version: "v4", auth });
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: "Hoja1!A:E",
       valueInputOption: "USER_ENTERED",
       requestBody: {
-        values: [
-          [
-            gastoData.fecha,
-            gastoData.descripcion,
-            gastoData.categoria,
-            gastoData.monto,
-            new Date().toLocaleString("es-AR"),
-          ],
-        ],
+        values: [[
+          gastoData.fecha,
+          gastoData.descripcion,
+          gastoData.categoria,
+          gastoData.monto,
+          new Date().toLocaleString("es-AR", TZ),
+        ]],
       },
     });
 
-    // Respuesta al usuario
-    const emoji = {
-      comida: "🍽️", transporte: "🚗", servicios: "💡",
-      salud: "🏥", entretenimiento: "🎬", ropa: "👕",
-      supermercado: "🛒", otro: "📌",
-    };
+    const emojis = { comida:"🍽️", transporte:"🚗", servicios:"💡", salud:"🏥", entretenimiento:"🎬", ropa:"👕", supermercado:"🛒", otro:"📌" };
     const cat = gastoData.categoria?.toLowerCase() || "otro";
 
     twiml.message(
       `✅ Gasto registrado!\n\n` +
       `💰 *$${gastoData.monto}*\n` +
       `📝 ${gastoData.descripcion}\n` +
-      `${emoji[cat] || "📌"} ${gastoData.categoria}\n` +
+      `${emojis[cat] || "📌"} ${gastoData.categoria}\n` +
       `📅 ${gastoData.fecha}`
     );
+
   } catch (err) {
     console.error("Error:", err);
     twiml.message("❌ Hubo un error al registrar el gasto. Intentá de nuevo.");

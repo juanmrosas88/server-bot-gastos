@@ -58,7 +58,7 @@ async function ultimaFechaDelSheet() {
     const sheets = google.sheets({ version: "v4", auth });
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
-      range: "Hoja1!A:A",
+      range: "Hoja 1!A:A",
     });
     const filas = res.data.values || [];
     // La última fila con valor (saltear header si existe)

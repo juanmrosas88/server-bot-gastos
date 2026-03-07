@@ -16,17 +16,15 @@ const SHEET_ID = process.env.SHEET_ID;
 const TZ = { timeZone: "America/Argentina/Buenos_Aires" };
 
 function fechaHoy() {
-  return new Date().toLocaleDateString("es-AR", TZ); // dd/mm/aaaa
+  return new Date().toLocaleDateString("es-AR", TZ);
 }
 
 function parsearMensaje(texto) {
   const lineas = texto.trim().split("\n").map(l => l.trim()).filter(l => l.length > 0);
-  
   let fecha = null;
   const gastos = [];
 
   for (const linea of lineas) {
-    // Detectar si la línea es solo una fecha: 2/3 o 02/03 o 2/3/2026
     const esFecha = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/.test(linea);
     if (esFecha) {
       const match = linea.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
@@ -37,8 +35,6 @@ function parsearMensaje(texto) {
       continue;
     }
 
-    // Detectar líneas con descripción y monto al final
-    // Acepta números con punto o coma como separador de miles: 17500, 17.500, 17,500
     const matchGasto = linea.match(/^(.+?)\s+([\d.,]+)\s*$/);
     if (matchGasto) {
       const descripcion = matchGasto[1].trim();
@@ -61,7 +57,6 @@ async function ultimaFechaDelSheet() {
       range: "Hoja 1!A:A",
     });
     const filas = res.data.values || [];
-    // La última fila con valor (saltear header si existe)
     for (let i = filas.length - 1; i >= 0; i--) {
       const val = filas[i][0];
       if (val && /\d{1,2}\/\d{1,2}/.test(val)) return val;
@@ -70,6 +65,31 @@ async function ultimaFechaDelSheet() {
     console.error("Error leyendo última fecha:", e);
   }
   return null;
+}
+
+async function totalPorFecha(fechaBuscar) {
+  const match = fechaBuscar.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+  if (!match) return null;
+  const dia = match[1].padStart(2, "0");
+  const mes = match[2].padStart(2, "0");
+  const anio = match[3] ? (match[3].length === 2 ? "20" + match[3] : match[3]) : new Date().getFullYear();
+  const fechaNorm = `${dia}/${mes}/${anio}`;
+
+  const sheets = google.sheets({ version: "v4", auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: "Hoja 1!A:C",
+  });
+  const filas = res.data.values || [];
+  const gastosDia = filas.filter(f => f[0] === fechaNorm && f[2]);
+  if (gastosDia.length === 0) return { fecha: fechaNorm, gastos: [], total: 0 };
+
+  const gastos = gastosDia.map(f => ({
+    descripcion: f[1] || "",
+    monto: parseFloat(String(f[2]).replace(/\./g, "").replace(/,/g, "")) || 0,
+  }));
+  const total = gastos.reduce((s, g) => s + g.monto, 0);
+  return { fecha: fechaNorm, gastos, total };
 }
 
 app.get("/", (req, res) => res.send("Bot de gastos activo ✅"));
@@ -85,26 +105,56 @@ app.post("/webhook", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    const { fecha: fechaParsed, gastos } = parsearMensaje(Body);
+    const texto = Body.trim();
 
-    if (gastos.length === 0) {
-      twiml.message("No encontré gastos. Enviame así:\n\n2/3\nAlmuerzo 350\nNafta 8000");
+    // Comando: ayuda
+    if (/^ayuda$/i.test(texto)) {
+      twiml.message(
+        `📖 *Comandos:*\n\n` +
+        `*Registrar gastos:*\n6/3\nPizzas 5000\nNafta 8000\n\n` +
+        `*Sin fecha* → usa la última fecha registrada\n\n` +
+        `*Total de un día:*\ntotal 6/3\n\n` +
+        `*Total de hoy:*\ntotal hoy`
+      );
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // Si no hay fecha en el mensaje, buscar la última del sheet
+    // Comando: total hoy / total 6/3
+    const matchTotal = texto.match(/^total\s+(.+)$/i);
+    if (matchTotal) {
+      const arg = matchTotal[1].trim().toLowerCase();
+      const fechaConsulta = arg === "hoy" ? fechaHoy() : arg;
+      const resultado = await totalPorFecha(fechaConsulta);
+
+      if (!resultado) {
+        twiml.message("Fecha inválida. Usá: *total 6/3* o *total hoy*");
+      } else if (resultado.gastos.length === 0) {
+        twiml.message(`No hay gastos registrados para el ${resultado.fecha}.`);
+      } else {
+        const detalles = resultado.gastos
+          .map(g => `  • ${g.descripcion}: $${g.monto.toLocaleString("es-AR")}`)
+          .join("\n");
+        twiml.message(
+          `📅 *${resultado.fecha}*\n\n${detalles}\n\n💰 *Total: $${resultado.total.toLocaleString("es-AR")}*`
+        );
+      }
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    // Registrar gastos
+    const { fecha: fechaParsed, gastos } = parsearMensaje(Body);
+
+    if (gastos.length === 0) {
+      twiml.message("No encontré gastos. Enviame así:\n\n2/3\nAlmuerzo 350\nNafta 8000\n\nO escribí *ayuda*");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     let fecha = fechaParsed;
-    if (!fecha) {
-      fecha = await ultimaFechaDelSheet();
-    }
-    // Si tampoco hay en el sheet, usar hoy
-    if (!fecha) {
-      fecha = fechaHoy();
-    }
+    if (!fecha) fecha = await ultimaFechaDelSheet();
+    if (!fecha) fecha = fechaHoy();
 
     const timestamp = new Date().toLocaleString("es-AR", TZ);
     const sheets = google.sheets({ version: "v4", auth });
-
     const filas = gastos.map(g => [fecha, g.descripcion, g.monto, timestamp]);
 
     await sheets.spreadsheets.values.append({
@@ -114,7 +164,6 @@ app.post("/webhook", async (req, res) => {
       requestBody: { values: filas },
     });
 
-    // Armar respuesta
     const total = gastos.reduce((sum, g) => sum + g.monto, 0);
     const detalles = gastos.map(g => `  • ${g.descripcion}: $${g.monto.toLocaleString("es-AR")}`).join("\n");
 
@@ -127,7 +176,7 @@ app.post("/webhook", async (req, res) => {
 
   } catch (err) {
     console.error("Error:", err);
-    twiml.message("❌ Hubo un error al registrar. Intentá de nuevo.");
+    twiml.message("❌ Hubo un error. Intentá de nuevo.");
   }
 
   res.type("text/xml").send(twiml.toString());
